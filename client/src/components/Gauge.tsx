@@ -1,11 +1,8 @@
 import { useEffect, useState } from 'react';
 
 interface GaugeProps {
-  /** Normalized position from 0 (left end of the dial) to 1 (right end). */
   value: number;
-  /** Short numeric readout shown under the needle, e.g. "+0.42" or "61%". */
   readout: string;
-  /** Word label for the current reading, e.g. "Center-left" or "Charged". */
   label: string;
   leftCaption: string;
   rightCaption: string;
@@ -40,8 +37,6 @@ export default function Gauge({
   const [animated, setAnimated] = useState(0);
   const gradientId = `gauge-grad-${leftCaption}-${rightCaption}`.replace(/\s+/g, '');
 
-  // Sweep the needle into place shortly after mount rather than snapping to
-  // its final position instantly — the dial should feel like it's settling.
   useEffect(() => {
     const id = window.setTimeout(() => setAnimated(clamped), 120);
     return () => window.clearTimeout(id);
@@ -65,11 +60,12 @@ export default function Gauge({
           </linearGradient>
         </defs>
 
-        <path d={`M ${CX - R} ${CY} A ${R} ${R} 0 0 1 ${CX + R} ${CY}`} className="gauge-track-bg" />
+        <path d={`M ${CX - R} ${CY} A ${R} ${R} 0 0 1 ${CX + R} ${CY}`} className="gauge-track-bg" strokeLinecap="square" />
         <path
           d={`M ${CX - R} ${CY} A ${R} ${R} 0 0 1 ${CX + R} ${CY}`}
           stroke={`url(#${gradientId})`}
           className="gauge-track"
+          strokeLinecap="square"
         />
 
         {ticks.map((tick) => (
@@ -89,12 +85,13 @@ export default function Gauge({
           x2={CX}
           y2={CY - R + 24}
           className="gauge-needle"
+          strokeLinecap="square"
           style={{
             transform: `rotate(${needleAngleDeg}deg)`,
             transformOrigin: `${CX}px ${CY}px`,
           }}
         />
-        <circle cx={CX} cy={CY} r="7" className="gauge-pivot" />
+        <rect x={CX - 6} y={CY - 6} width="12" height="12" className="gauge-pivot" />
 
         <text x={CX} y={CY - 38} textAnchor="middle" className="gauge-readout">
           {readout}

@@ -25,20 +25,20 @@ export default function ChatConsole({ messages, inputValue, loading, onInputChan
   return (
     <div className="console">
       <div className="console-header">
-        <span className="console-dot" />
-        <span>Ask the model about this article</span>
+        <span className="console-block" />
+        <span>Model Interface</span>
       </div>
 
       <div className="console-feed" ref={feedRef}>
         {messages.length === 0 && !loading && (
           <p className="console-empty">
-            No questions yet. Try asking what's missing from the coverage, or who benefits from the framing.
+            [Awaiting input. Probe the model for omitted context or framing.]
           </p>
         )}
 
         {messages.map((msg, i) => (
           <div key={i} className={`console-line ${msg.role}`}>
-            <span className="console-prompt">{msg.role === 'user' ? '›' : 'AI'}</span>
+            <span className="console-prompt">{msg.role === 'user' ? 'USR' : 'SYS'}</span>
             <div className="console-bubble">
               <p>{msg.parts[0].text}</p>
               {msg.ts && <span className="console-time">{formatTime(msg.ts)}</span>}
@@ -48,7 +48,7 @@ export default function ChatConsole({ messages, inputValue, loading, onInputChan
 
         {loading && (
           <div className="console-line model">
-            <span className="console-prompt">AI</span>
+            <span className="console-prompt">SYS</span>
             <div className="console-bubble console-bubble-loading">
               <Loader2 size={14} className="spin" />
             </div>
@@ -62,7 +62,7 @@ export default function ChatConsole({ messages, inputValue, loading, onInputChan
           value={inputValue}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && onSend()}
-          placeholder="Ask a question about this article…"
+          placeholder="Transmit query..."
         />
         <button className="console-send" onClick={onSend} disabled={!inputValue.trim() || loading} aria-label="Send question">
           <Send size={16} />

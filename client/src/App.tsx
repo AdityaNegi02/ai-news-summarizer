@@ -10,6 +10,8 @@ import {
   ChevronDown,
   ChevronUp,
   AlertCircle,
+  Sun,
+  Moon
 } from 'lucide-react';
 import Gauge from './components/Gauge';
 import ChatConsole from './components/ChatConsole';
@@ -17,7 +19,6 @@ import type { NewsArticle, AnalysisResult, AnalysisState, SessionEntry } from '.
 import './App.css';
 
 const API_BASE = 'http://localhost:3001';
-
 const SCAN_STAGES = ['Reading the article', 'Modeling tone', 'Scoring bias'];
 
 const TIMEFRAME_LABELS: Record<string, string> = {
@@ -27,7 +28,6 @@ const TIMEFRAME_LABELS: Record<string, string> = {
   '1y': 'past year',
 };
 
-/** Cycles through a few plain-language status lines while an analysis call is in flight. */
 function ScanningLabel() {
   const [stage, setStage] = useState(0);
   useEffect(() => {
@@ -52,7 +52,6 @@ function formatRelativeTime(dateString: string) {
   return date.toLocaleDateString();
 }
 
-/** Rough reading-time estimate from a character count — not exact, just a useful signpost. */
 function readingTime(length?: number) {
   if (!length || length <= 0) return null;
   const words = length / 5.2;
@@ -68,6 +67,10 @@ function safeHostname(url: string) {
 }
 
 function App() {
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return (window.localStorage.getItem('newzy-theme') as 'dark' | 'light') || 'dark';
+  });
+
   const [activeView, setActiveView] = useState<'search' | 'direct'>('search');
   const [topic, setTopic] = useState('');
   const [location, setLocation] = useState('');
@@ -95,19 +98,20 @@ function App() {
 
   const topicInputRef = useRef<HTMLInputElement>(null);
 
-  // Live clock in the header — a small detail that signals this is a "live" panel.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    window.localStorage.setItem('newzy-theme', theme);
+  }, [theme]);
+
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
-  // Persist the session log across reloads.
   useEffect(() => {
     try {
       window.localStorage.setItem('insightstream-session-log', JSON.stringify(sessionLog));
-    } catch {
-      // Storage unavailable (private browsing, quota, etc.) — log just won't persist.
-    }
+    } catch {}
   }, [sessionLog]);
 
   function showToast(message: string) {
@@ -223,7 +227,6 @@ function App() {
     }
   }
 
-  // Keyboard shortcuts: "/" focuses the topic field, Cmd/Ctrl+Enter runs the direct analysis.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement;
@@ -238,7 +241,6 @@ function App() {
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, directInput, directInputType]);
 
   function renderAnalysis(url: string) {
@@ -285,9 +287,9 @@ function App() {
                   label={state.data.politicalBias.label}
                   leftCaption="Left"
                   rightCaption="Right"
-                  colorFrom="#c1483f"
-                  colorMid="#6b7280"
-                  colorTo="#3f6fb0"
+                  colorFrom="var(--crimson)"
+                  colorMid="var(--mid)"
+                  colorTo="var(--azure)"
                 />
                 <p className="gauge-desc">{state.data.politicalBias.explanation}</p>
               </div>
@@ -298,9 +300,9 @@ function App() {
                   label={state.data.emotionalBias.label}
                   leftCaption="Calm"
                   rightCaption="Charged"
-                  colorFrom="#4fb3a9"
-                  colorMid="#d8a94e"
-                  colorTo="#c1483f"
+                  colorFrom="var(--teal)"
+                  colorMid="var(--mid)"
+                  colorTo="var(--crimson)"
                 />
                 <p className="gauge-desc">{state.data.emotionalBias.explanation}</p>
               </div>
@@ -326,19 +328,28 @@ function App() {
       <header className="masthead">
         <div className="masthead-row">
           <div className="status-chip">
-            <span className="pulse-dot" />
-            <span>Live</span>
+            <span className="pulse-block" />
+            <span>Live System</span>
             <span className="status-time">
               {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
             </span>
           </div>
-          <button className="log-toggle" onClick={() => setShowLog((v) => !v)}>
-            Session log
-            <span className="log-count">{sessionLog.length}</span>
-            {showLog ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
+          <div className="masthead-controls">
+            <button 
+              className="btn-icon" 
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              aria-label="Toggle Theme"
+            >
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <button className="log-toggle" onClick={() => setShowLog((v) => !v)}>
+              Log
+              <span className="log-count">{sessionLog.length}</span>
+              {showLog ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          </div>
         </div>
-        <h1 className="wordmark">InsightStream</h1>
+        <h1 className="wordmark">NEWZY</h1>
         <p className="tagline">Tracking bias in the news, article by article</p>
       </header>
 
@@ -346,7 +357,7 @@ function App() {
         <section className="log-panel">
           {sessionLog.length === 0 ? (
             <p className="log-empty">
-              Nothing analyzed yet this session. Articles you check will collect here for quick comparison.
+              System empty. Run analysis to populate log sequence.
             </p>
           ) : (
             <>
@@ -354,27 +365,27 @@ function App() {
                 {sessionLog.map((entry) => (
                   <div key={entry.key} className="log-entry">
                     <span
-                      className="log-dot"
+                      className="log-block"
                       style={{
                         background:
                           entry.politicalScore < -0.15
                             ? 'var(--crimson)'
                             : entry.politicalScore > 0.15
                             ? 'var(--azure)'
-                            : 'var(--paper-dim)',
+                            : 'var(--mid)',
                       }}
                     />
                     <div className="log-entry-body">
                       <span className="log-entry-title">{entry.title}</span>
                       <span className="log-entry-meta">
-                        {entry.sourceLabel} · {entry.politicalLabel} · {entry.emotionalLabel}
+                        {entry.sourceLabel} // {entry.politicalLabel} // {entry.emotionalLabel}
                       </span>
                     </div>
                   </div>
                 ))}
               </div>
               <button className="log-clear" onClick={() => setSessionLog([])}>
-                Clear session
+                Purge Log
               </button>
             </>
           )}
@@ -382,15 +393,11 @@ function App() {
       )}
 
       <nav className="segmented" aria-label="View selector">
-        <span
-          className="segmented-indicator"
-          style={{ transform: activeView === 'search' ? 'translateX(0%)' : 'translateX(100%)' }}
-        />
         <button className={activeView === 'search' ? 'active' : ''} onClick={() => setActiveView('search')}>
-          Discover
+          Discover Engine
         </button>
         <button className={activeView === 'direct' ? 'active' : ''} onClick={() => setActiveView('direct')}>
-          Direct input
+          Direct Input
         </button>
       </nav>
 
@@ -405,7 +412,7 @@ function App() {
                   <input
                     ref={topicInputRef}
                     type="text"
-                    placeholder="elections, climate, the local council…"
+                    placeholder="Elections, climate..."
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
                   />
@@ -417,7 +424,7 @@ function App() {
                   <MapPin size={16} className="field-icon" />
                   <input
                     type="text"
-                    placeholder="city, state, or country"
+                    placeholder="Region..."
                     value={location}
                     onChange={(e) => setLocation(e.target.value)}
                   />
@@ -428,19 +435,19 @@ function App() {
                 <div className="field-control">
                   <Clock size={16} className="field-icon" />
                   <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-                    <option value="1h">Past hour</option>
-                    <option value="1d">Past 24 hours</option>
-                    <option value="7d">Past week</option>
-                    <option value="1y">Past year</option>
+                    <option value="1h">Past 1H</option>
+                    <option value="1d">Past 24H</option>
+                    <option value="7d">Past 7D</option>
+                    <option value="1y">Past 1Y</option>
                   </select>
                 </div>
               </div>
               <button className="btn-primary" onClick={handleSearch} disabled={loadingSearch}>
-                {loadingSearch ? <Loader2 size={16} className="spin" /> : 'Run search'}
+                {loadingSearch ? <Loader2 size={16} className="spin" /> : 'Run'}
               </button>
             </div>
             <p className="hint">
-              Press <kbd>/</kbd> to jump to topic
+              Press <kbd>/</kbd> to jump to topic input
             </p>
           </section>
 
@@ -461,7 +468,7 @@ function App() {
                   <h3 className="article-title">{article.title}</h3>
                   <div className="article-actions">
                     <a href={article.link} target="_blank" rel="noopener noreferrer" className="btn-ghost">
-                      Read article <ArrowUpRight size={14} />
+                      Source <ArrowUpRight size={14} />
                     </a>
                     <button
                       className="btn-primary"
@@ -470,22 +477,13 @@ function App() {
                       }
                       disabled={analysisMap[article.link]?.loading}
                     >
-                      {analysisMap[article.link]?.loading ? <Loader2 size={16} className="spin" /> : 'Analyze bias'}
+                      {analysisMap[article.link]?.loading ? <Loader2 size={16} className="spin" /> : 'Analyze'}
                     </button>
                   </div>
                 </div>
                 {renderAnalysis(article.link)}
               </article>
             ))}
-
-            {articles.length === 0 && !loadingSearch && !searchError && (
-              <div className="empty-state">
-                <p>
-                  No results yet. Set a topic and location, then run the search — coverage from the{' '}
-                  {TIMEFRAME_LABELS[timeframe] || 'selected window'} will appear here.
-                </p>
-              </div>
-            )}
           </div>
         </div>
       ) : (
@@ -494,10 +492,10 @@ function App() {
             <div className="direct-card">
               <div className="direct-tabs">
                 <button className={directInputType === 'url' ? 'active' : ''} onClick={() => setDirectInputType('url')}>
-                  Link
+                  Remote URL
                 </button>
                 <button className={directInputType === 'text' ? 'active' : ''} onClick={() => setDirectInputType('text')}>
-                  Pasted text
+                  Raw Text
                 </button>
               </div>
               <div className="direct-body">
@@ -522,10 +520,10 @@ function App() {
                   onClick={() => handleAnalyze(directInput, directInputType === 'text')}
                   disabled={!directInput.trim() || analysisMap[directInput]?.loading}
                 >
-                  {analysisMap[directInput]?.loading ? <Loader2 size={16} className="spin" /> : 'Run analysis'}
+                  {analysisMap[directInput]?.loading ? <Loader2 size={16} className="spin" /> : 'Execute Sequence'}
                 </button>
                 <p className="hint">
-                  Press <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> to run
+                  Press <kbd>⌘</kbd> + <kbd>Enter</kbd> to run
                 </p>
               </div>
             </div>
