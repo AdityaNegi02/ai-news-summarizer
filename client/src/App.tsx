@@ -1,20 +1,70 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Search, MapPin, Clock, Loader2 } from 'lucide-react';
+import {
+  Search,
+  MapPin,
+  Clock,
+  Loader2,
+  ArrowUpRight,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+  AlertCircle,
+} from 'lucide-react';
+import Gauge from './components/Gauge';
+import ChatConsole from './components/ChatConsole';
+import type { NewsArticle, AnalysisResult, AnalysisState, SessionEntry } from './types';
 import './App.css';
 
-interface NewsArticle {
-  title: string;
-  link: string;
-  pubDate: string;
-  source: string;
+const API_BASE = 'http://localhost:3001';
+
+const SCAN_STAGES = ['Reading the article', 'Modeling tone', 'Scoring bias'];
+
+const TIMEFRAME_LABELS: Record<string, string> = {
+  '1h': 'past hour',
+  '1d': 'past 24 hours',
+  '7d': 'past week',
+  '1y': 'past year',
+};
+
+/** Cycles through a few plain-language status lines while an analysis call is in flight. */
+function ScanningLabel() {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setStage((current) => (current + 1) % SCAN_STAGES.length);
+    }, 900);
+    return () => window.clearInterval(id);
+  }, []);
+  return <span className="scan-label">{SCAN_STAGES[stage]}…</span>;
 }
 
-interface AnalysisResult {
-  summary: string;
-  politicalBias: { score: number; label: string; explanation: string };
-  emotionalBias: { score: number; label: string; explanation: string };
-  originalLength: number;
+function formatRelativeTime(dateString: string) {
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return '';
+  const diffMin = Math.round((Date.now() - date.getTime()) / 60000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString();
+}
+
+/** Rough reading-time estimate from a character count — not exact, just a useful signpost. */
+function readingTime(length?: number) {
+  if (!length || length <= 0) return null;
+  const words = length / 5.2;
+  return Math.max(1, Math.round(words / 200));
+}
+
+function safeHostname(url: string) {
+  try {
+    return new URL(url).hostname.replace('www.', '');
+  } catch {
+    return url.slice(0, 40);
+  }
 }
 
 function App() {
@@ -24,282 +74,467 @@ function App() {
   const [timeframe, setTimeframe] = useState('1d');
   const [articles, setArticles] = useState<NewsArticle[]>([]);
   const [loadingSearch, setLoadingSearch] = useState(false);
-  
-  // Direct input states
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   const [directInput, setDirectInput] = useState('');
   const [directInputType, setDirectInputType] = useState<'url' | 'text'>('url');
 
-  // Analysis state (mapped by article link)
-  const [analysisMap, setAnalysisMap] = useState<Record<string, { data?: AnalysisResult; loading: boolean; error?: string }>>({});
+  const [analysisMap, setAnalysisMap] = useState<Record<string, AnalysisState>>({});
+
+  const [sessionLog, setSessionLog] = useState<SessionEntry[]>(() => {
+    try {
+      const raw = window.localStorage.getItem('insightstream-session-log');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showLog, setShowLog] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [now, setNow] = useState(new Date());
+
+  const topicInputRef = useRef<HTMLInputElement>(null);
+
+  // Live clock in the header — a small detail that signals this is a "live" panel.
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Persist the session log across reloads.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('insightstream-session-log', JSON.stringify(sessionLog));
+    } catch {
+      // Storage unavailable (private browsing, quota, etc.) — log just won't persist.
+    }
+  }, [sessionLog]);
+
+  function showToast(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast((current) => (current === message ? null : current)), 2400);
+  }
 
   const handleSearch = async () => {
     setLoadingSearch(true);
+    setSearchError(null);
     try {
-      const { data } = await axios.get(`${API_BASE}/api/news/search`, {
-        params: { topic, location, timeframe }
+      const { data } = await axios.get<NewsArticle[]>(`${API_BASE}/api/news/search`, {
+        params: { topic, location, timeframe },
       });
       setArticles(data);
-    } catch (err) {
-      console.error('Search error:', err);
+    } catch (err: any) {
+      setSearchError(err.response?.data?.error || err.message || 'Search failed — check your connection and try again.');
+      setArticles([]);
     } finally {
       setLoadingSearch(false);
     }
   };
 
-  const API_BASE = 'http://localhost:3001';
+  const handleAnalyze = async (url: string, isText = false, meta?: { title?: string; source?: string }) => {
+    if (analysisMap[url]?.loading) return;
 
-  const handleAnalyze = async (url: string, isText = false) => {
-    console.log(`[UI] handleAnalyze called for: ${url.substring(0, 50)}...`);
-    
-    if (analysisMap[url]?.loading) {
-      console.log(`[UI] Already loading this article, skipping.`);
-      return;
-    }
-
-    setAnalysisMap(prev => ({ ...prev, [url]: { loading: true, error: undefined } }));
+    setAnalysisMap((prev) => ({
+      ...prev,
+      [url]: { loading: true, error: undefined, chatHistory: [], chatInput: '', chatLoading: false },
+    }));
 
     try {
       const endpoint = isText ? '/api/analyze/text' : '/api/analyze/url';
       const payload = isText ? { text: url } : { url };
-      
-      console.log(`[API] POST ${API_BASE}${endpoint}`);
-      const { data } = await axios.post(`${API_BASE}${endpoint}`, payload);
-      
-      console.log(`[API] Success!`, data);
-      setAnalysisMap(prev => ({ 
-        ...prev, 
-        [url]: { data, loading: false } 
-      }));
+      const { data } = await axios.post<AnalysisResult>(`${API_BASE}${endpoint}`, payload);
+
+      setAnalysisMap((prev) => ({ ...prev, [url]: { ...prev[url], data, loading: false } }));
+
+      const title = meta?.title || (isText ? data.summary.slice(0, 72) : safeHostname(url));
+      const sourceLabel = meta?.source || (isText ? 'Pasted text' : safeHostname(url));
+
+      setSessionLog((prev) => [
+        {
+          key: url,
+          title,
+          sourceLabel,
+          politicalLabel: data.politicalBias.label,
+          politicalScore: data.politicalBias.score,
+          emotionalLabel: data.emotionalBias.label,
+          emotionalScore: data.emotionalBias.score,
+          timestamp: Date.now(),
+        },
+        ...prev.filter((entry) => entry.key !== url),
+      ].slice(0, 20));
     } catch (err: any) {
-      console.error('[API] Error:', err);
       const errorMessage = err.response?.data?.error || err.message || 'Analysis failed';
-      setAnalysisMap(prev => ({ 
-        ...prev, 
-        [url]: { loading: false, error: errorMessage } 
+      setAnalysisMap((prev) => ({ ...prev, [url]: { ...prev[url], loading: false, error: errorMessage } }));
+    }
+  };
+
+  const handleChat = async (url: string) => {
+    const state = analysisMap[url];
+    if (!state?.data?.extractedText || !state.chatInput.trim() || state.chatLoading) return;
+
+    const userMessage = state.chatInput.trim();
+    const updatedHistory = [
+      ...state.chatHistory,
+      { role: 'user' as const, parts: [{ text: userMessage }], ts: Date.now() },
+    ];
+
+    setAnalysisMap((prev) => ({
+      ...prev,
+      [url]: { ...prev[url], chatHistory: updatedHistory, chatInput: '', chatLoading: true },
+    }));
+
+    try {
+      const { data } = await axios.post<{ answer: string }>(`${API_BASE}/api/chat`, {
+        articleText: state.data.extractedText,
+        question: userMessage,
+        history: state.chatHistory,
+      });
+
+      setAnalysisMap((prev) => ({
+        ...prev,
+        [url]: {
+          ...prev[url],
+          chatHistory: [...updatedHistory, { role: 'model' as const, parts: [{ text: data.answer }], ts: Date.now() }],
+          chatLoading: false,
+        },
+      }));
+    } catch {
+      setAnalysisMap((prev) => ({
+        ...prev,
+        [url]: { ...prev[url], chatLoading: false, error: 'Failed to get AI response' },
       }));
     }
   };
 
+  async function copySummary(url: string) {
+    const state = analysisMap[url];
+    if (!state?.data) return;
+    const lines = [
+      state.data.summary,
+      '',
+      `Political lean: ${state.data.politicalBias.label}`,
+      `Emotional charge: ${state.data.emotionalBias.label}`,
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      showToast('Summary copied to clipboard');
+    } catch {
+      showToast('Could not copy — try selecting the text manually');
+    }
+  }
+
+  // Keyboard shortcuts: "/" focuses the topic field, Cmd/Ctrl+Enter runs the direct analysis.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement;
+      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+      if (e.key === '/' && !isTyping) {
+        e.preventDefault();
+        if (activeView === 'search') topicInputRef.current?.focus();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && activeView === 'direct' && directInput.trim()) {
+        handleAnalyze(directInput, directInputType === 'text');
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, directInput, directInputType]);
+
+  function renderAnalysis(url: string) {
+    const state = analysisMap[url];
+    if (!state) return null;
+
+    return (
+      <div className="result-panel">
+        {state.loading && (
+          <div className="scan">
+            <div className="scan-beam" />
+            <ScanningLabel />
+          </div>
+        )}
+
+        {state.error && (
+          <p className="result-error">
+            <AlertCircle size={14} /> {state.error}
+          </p>
+        )}
+
+        {state.data && (
+          <>
+            <div className="summary-row">
+              <p className="summary">{state.data.summary}</p>
+              <button className="btn-ghost btn-copy" onClick={() => copySummary(url)}>
+                <Copy size={14} /> Copy
+              </button>
+            </div>
+
+            {readingTime(state.data.originalLength) && (
+              <p className="reading-meta">~{readingTime(state.data.originalLength)} min read in the original</p>
+            )}
+
+            <div className="gauge-row">
+              <div className="gauge-block">
+                <Gauge
+                  value={(state.data.politicalBias.score + 1) / 2}
+                  readout={
+                    state.data.politicalBias.score >= 0
+                      ? `+${state.data.politicalBias.score.toFixed(2)}`
+                      : state.data.politicalBias.score.toFixed(2)
+                  }
+                  label={state.data.politicalBias.label}
+                  leftCaption="Left"
+                  rightCaption="Right"
+                  colorFrom="#c1483f"
+                  colorMid="#6b7280"
+                  colorTo="#3f6fb0"
+                />
+                <p className="gauge-desc">{state.data.politicalBias.explanation}</p>
+              </div>
+              <div className="gauge-block">
+                <Gauge
+                  value={state.data.emotionalBias.score}
+                  readout={`${Math.round(state.data.emotionalBias.score * 100)}%`}
+                  label={state.data.emotionalBias.label}
+                  leftCaption="Calm"
+                  rightCaption="Charged"
+                  colorFrom="#4fb3a9"
+                  colorMid="#d8a94e"
+                  colorTo="#c1483f"
+                />
+                <p className="gauge-desc">{state.data.emotionalBias.explanation}</p>
+              </div>
+            </div>
+
+            <ChatConsole
+              messages={state.chatHistory}
+              inputValue={state.chatInput}
+              loading={state.chatLoading}
+              onInputChange={(value) =>
+                setAnalysisMap((prev) => ({ ...prev, [url]: { ...prev[url], chatInput: value } }))
+              }
+              onSend={() => handleChat(url)}
+            />
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="container">
-      <header className="header">
-        <h1>📰 InsightStream</h1>
-        <p>Localized news aggregator with AI-powered bias detection.</p>
+    <div className="page">
+      <header className="masthead">
+        <div className="masthead-row">
+          <div className="status-chip">
+            <span className="pulse-dot" />
+            <span>Live</span>
+            <span className="status-time">
+              {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </span>
+          </div>
+          <button className="log-toggle" onClick={() => setShowLog((v) => !v)}>
+            Session log
+            <span className="log-count">{sessionLog.length}</span>
+            {showLog ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+        </div>
+        <h1 className="wordmark">InsightStream</h1>
+        <p className="tagline">Tracking bias in the news, article by article</p>
       </header>
 
-      <div className="nav-tabs">
-        <button 
-          className={`nav-tab ${activeView === 'search' ? 'active' : ''}`}
-          onClick={() => setActiveView('search')}
-        >
-          Discover News
+      {showLog && (
+        <section className="log-panel">
+          {sessionLog.length === 0 ? (
+            <p className="log-empty">
+              Nothing analyzed yet this session. Articles you check will collect here for quick comparison.
+            </p>
+          ) : (
+            <>
+              <div className="log-list">
+                {sessionLog.map((entry) => (
+                  <div key={entry.key} className="log-entry">
+                    <span
+                      className="log-dot"
+                      style={{
+                        background:
+                          entry.politicalScore < -0.15
+                            ? 'var(--crimson)'
+                            : entry.politicalScore > 0.15
+                            ? 'var(--azure)'
+                            : 'var(--paper-dim)',
+                      }}
+                    />
+                    <div className="log-entry-body">
+                      <span className="log-entry-title">{entry.title}</span>
+                      <span className="log-entry-meta">
+                        {entry.sourceLabel} · {entry.politicalLabel} · {entry.emotionalLabel}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button className="log-clear" onClick={() => setSessionLog([])}>
+                Clear session
+              </button>
+            </>
+          )}
+        </section>
+      )}
+
+      <nav className="segmented" aria-label="View selector">
+        <span
+          className="segmented-indicator"
+          style={{ transform: activeView === 'search' ? 'translateX(0%)' : 'translateX(100%)' }}
+        />
+        <button className={activeView === 'search' ? 'active' : ''} onClick={() => setActiveView('search')}>
+          Discover
         </button>
-        <button 
-          className={`nav-tab ${activeView === 'direct' ? 'active' : ''}`}
-          onClick={() => setActiveView('direct')}
-        >
-          Direct Analysis
+        <button className={activeView === 'direct' ? 'active' : ''} onClick={() => setActiveView('direct')}>
+          Direct input
         </button>
-      </div>
+      </nav>
 
       {activeView === 'search' ? (
         <div className="search-view">
-          <div className="search-card">
-            <div className="search-grid">
-              <div>
-                <label className="input-label">Topic</label>
-                <div style={{ position: 'relative' }}>
-                  <Search size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                  <input 
-                    type="text" 
-                    placeholder="e.g. Technology, Elections..." 
-                    style={{ paddingLeft: '40px' }}
+          <section className="search-panel">
+            <div className="panel-frame">
+              <div className="field">
+                <label>Topic</label>
+                <div className="field-control">
+                  <Search size={16} className="field-icon" />
+                  <input
+                    ref={topicInputRef}
+                    type="text"
+                    placeholder="elections, climate, the local council…"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
                   />
                 </div>
               </div>
-              <div>
-                <label className="input-label">Location</label>
-                <div style={{ position: 'relative' }}>
-                  <MapPin size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                  <input 
-                    type="text" 
-                    placeholder="City, State, or Country" 
-                    style={{ paddingLeft: '40px' }}
+              <div className="field">
+                <label>Location</label>
+                <div className="field-control">
+                  <MapPin size={16} className="field-icon" />
+                  <input
+                    type="text"
+                    placeholder="city, state, or country"
                     value={location}
                     onChange={(e) => setLocation(e.target.value)}
                   />
                 </div>
               </div>
-              <div>
-                <label className="input-label">Timeframe</label>
-                <div style={{ position: 'relative' }}>
-                  <Clock size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                  <select 
-                    style={{ paddingLeft: '40px', width: '100%', height: '42px', borderRadius: '8px', border: '1px solid var(--border)' }}
-                    value={timeframe}
-                    onChange={(e) => setTimeframe(e.target.value)}
-                  >
-                    <option value="1h">Past Hour</option>
-                    <option value="1d">Past 24 Hours</option>
-                    <option value="7d">Past Week</option>
-                    <option value="1y">Past Year</option>
+              <div className="field">
+                <label>Window</label>
+                <div className="field-control">
+                  <Clock size={16} className="field-icon" />
+                  <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+                    <option value="1h">Past hour</option>
+                    <option value="1d">Past 24 hours</option>
+                    <option value="7d">Past week</option>
+                    <option value="1y">Past year</option>
                   </select>
                 </div>
               </div>
-              <button className="btn" style={{ height: '42px' }} onClick={handleSearch} disabled={loadingSearch}>
-                {loadingSearch ? <Loader2 className="loader-icon" /> : 'Search'}
+              <button className="btn-primary" onClick={handleSearch} disabled={loadingSearch}>
+                {loadingSearch ? <Loader2 size={16} className="spin" /> : 'Run search'}
               </button>
             </div>
-          </div>
+            <p className="hint">
+              Press <kbd>/</kbd> to jump to topic
+            </p>
+          </section>
+
+          {searchError && (
+            <div className="error-banner">
+              <AlertCircle size={16} /> {searchError}
+            </div>
+          )}
 
           <div className="article-list">
-            {articles.map((article, index) => (
-              <div key={index} className="article-card">
-                <div className="article-content">
-                  <div className="article-header">
-                    <span className="article-source">{article.source}</span>
-                    <span className="article-date">{new Date(article.pubDate).toLocaleDateString()}</span>
+            {articles.map((article) => (
+              <article key={article.link} className="article-card">
+                <div className="article-body">
+                  <div className="article-top">
+                    <span className="stamp">{article.source}</span>
+                    <span className="time-readout">{formatRelativeTime(article.pubDate)}</span>
                   </div>
                   <h3 className="article-title">{article.title}</h3>
-                  <div style={{ display: 'flex', gap: '1rem' }}>
-                    <a href={article.link} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">
-                      Read Article
+                  <div className="article-actions">
+                    <a href={article.link} target="_blank" rel="noopener noreferrer" className="btn-ghost">
+                      Read article <ArrowUpRight size={14} />
                     </a>
-                    <button 
-                      className="btn" 
-                      onClick={() => handleAnalyze(article.link)}
+                    <button
+                      className="btn-primary"
+                      onClick={() =>
+                        handleAnalyze(article.link, false, { title: article.title, source: article.source })
+                      }
                       disabled={analysisMap[article.link]?.loading}
                     >
-                      {analysisMap[article.link]?.loading ? <Loader2 className="loader-icon" /> : 'Analyze Bias & Summary'}
+                      {analysisMap[article.link]?.loading ? <Loader2 size={16} className="spin" /> : 'Analyze bias'}
                     </button>
                   </div>
                 </div>
-
-                {analysisMap[article.link] && (
-                  <div className="analysis-results">
-                    {analysisMap[article.link].loading && <p>Analyzing article content...</p>}
-                    {analysisMap[article.link].error && <p className="error-msg" style={{ color: 'red' }}>{analysisMap[article.link].error}</p>}
-                    {analysisMap[article.link].data && (
-                      <>
-                        <div className="summary-text">
-                          <strong>Summary:</strong> {analysisMap[article.link].data?.summary}
-                        </div>
-                        <div className="bias-row">
-                          <div className="bias-box">
-                            <div className="bias-label">
-                              <span>Political Bias</span>
-                              <span style={{ color: 'var(--primary)' }}>{analysisMap[article.link].data?.politicalBias.label}</span>
-                            </div>
-                            <div className="bias-track">
-                              <div 
-                                className="bias-marker" 
-                                style={{ left: `${((analysisMap[article.link].data!.politicalBias.score + 1) / 2) * 100}%` }}
-                              ></div>
-                            </div>
-                            <p className="bias-desc">{analysisMap[article.link].data?.politicalBias.explanation}</p>
-                          </div>
-                          <div className="bias-box">
-                            <div className="bias-label">
-                              <span>Emotional Bias</span>
-                              <span style={{ color: 'var(--primary)' }}>{analysisMap[article.link].data?.emotionalBias.label}</span>
-                            </div>
-                            <div className="bias-track">
-                              <div 
-                                className="bias-marker" 
-                                style={{ left: `${analysisMap[article.link].data!.emotionalBias.score * 100}%` }}
-                              ></div>
-                            </div>
-                            <p className="bias-desc">{analysisMap[article.link].data?.emotionalBias.explanation}</p>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
+                {renderAnalysis(article.link)}
+              </article>
             ))}
-            {articles.length === 0 && !loadingSearch && (
-              <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                <Search size={48} style={{ marginBottom: '1rem', opacity: 0.2 }} />
-                <p>Search for a topic and location to see news.</p>
+
+            {articles.length === 0 && !loadingSearch && !searchError && (
+              <div className="empty-state">
+                <p>
+                  No results yet. Set a topic and location, then run the search — coverage from the{' '}
+                  {TIMEFRAME_LABELS[timeframe] || 'selected window'} will appear here.
+                </p>
               </div>
             )}
           </div>
         </div>
       ) : (
         <div className="direct-view">
-          <div className="search-card">
-            <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-              <button 
-                className={`tab ${directInputType === 'url' ? 'active' : ''}`}
-                onClick={() => setDirectInputType('url')}
-                style={{ padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid var(--border)', background: directInputType === 'url' ? '#eff6ff' : 'white' }}
-              >
-                URL
-              </button>
-              <button 
-                className={`tab ${directInputType === 'text' ? 'active' : ''}`}
-                onClick={() => setDirectInputType('text')}
-                style={{ padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid var(--border)', background: directInputType === 'text' ? '#eff6ff' : 'white' }}
-              >
-                Raw Text
-              </button>
-            </div>
-            {directInputType === 'url' ? (
-              <input 
-                type="text" 
-                placeholder="Paste news article URL here..." 
-                value={directInput}
-                onChange={(e) => setDirectInput(e.target.value)}
-              />
-            ) : (
-              <textarea 
-                placeholder="Paste full article text here..." 
-                style={{ width: '100%', minHeight: '200px', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border)', marginTop: '0.5rem' }}
-                value={directInput}
-                onChange={(e) => setDirectInput(e.target.value)}
-              />
-            )}
-            <button 
-              className="btn" 
-              style={{ marginTop: '1rem', width: '100%' }}
-              onClick={() => handleAnalyze(directInput, directInputType === 'text')}
-              disabled={!directInput.trim() || analysisMap[directInput]?.loading}
-            >
-              {analysisMap[directInput]?.loading ? <Loader2 className="loader-icon" /> : 'Analyze Content'}
-            </button>
-          </div>
-
-          {analysisMap[directInput]?.data && (
-            <div className="card" style={{ background: 'white', padding: '2rem', borderRadius: '12px', boxShadow: 'var(--shadow)' }}>
-              <h3 style={{ marginTop: 0 }}>Analysis Result</h3>
-              <p className="summary-text">{analysisMap[directInput].data?.summary}</p>
-              <div className="bias-row">
-                 <div className="bias-box">
-                  <div className="bias-label">
-                    <span>Political Bias</span>
-                    <span>{analysisMap[directInput].data?.politicalBias.label}</span>
-                  </div>
-                  <div className="bias-track">
-                    <div className="bias-marker" style={{ left: `${((analysisMap[directInput].data!.politicalBias.score + 1) / 2) * 100}%` }}></div>
-                  </div>
-                </div>
-                <div className="bias-box">
-                  <div className="bias-label">
-                    <span>Emotional Bias</span>
-                    <span>{analysisMap[directInput].data?.emotionalBias.label}</span>
-                  </div>
-                  <div className="bias-track">
-                    <div className="bias-marker" style={{ left: `${analysisMap[directInput].data!.emotionalBias.score * 100}%` }}></div>
-                  </div>
-                </div>
+          <section className="direct-panel">
+            <div className="direct-card">
+              <div className="direct-tabs">
+                <button className={directInputType === 'url' ? 'active' : ''} onClick={() => setDirectInputType('url')}>
+                  Link
+                </button>
+                <button className={directInputType === 'text' ? 'active' : ''} onClick={() => setDirectInputType('text')}>
+                  Pasted text
+                </button>
+              </div>
+              <div className="direct-body">
+                {directInputType === 'url' ? (
+                  <input
+                    type="text"
+                    className="direct-input"
+                    placeholder="https://example.com/news-article"
+                    value={directInput}
+                    onChange={(e) => setDirectInput(e.target.value)}
+                  />
+                ) : (
+                  <textarea
+                    className="direct-textarea"
+                    placeholder="Paste the full article text here…"
+                    value={directInput}
+                    onChange={(e) => setDirectInput(e.target.value)}
+                  />
+                )}
+                <button
+                  className="btn-primary btn-block"
+                  onClick={() => handleAnalyze(directInput, directInputType === 'text')}
+                  disabled={!directInput.trim() || analysisMap[directInput]?.loading}
+                >
+                  {analysisMap[directInput]?.loading ? <Loader2 size={16} className="spin" /> : 'Run analysis'}
+                </button>
+                <p className="hint">
+                  Press <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> to run
+                </p>
               </div>
             </div>
-          )}
+            {directInput.trim() && renderAnalysis(directInput)}
+          </section>
         </div>
       )}
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

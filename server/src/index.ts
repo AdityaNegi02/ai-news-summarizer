@@ -1,9 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { scrapeArticle } from './services/scraper';
-import { analyzeArticle } from './services/gemini';
-import { searchNews } from './services/newsService';
+import { scrapeArticle } from './services/scraper.js';
+import { analyzeArticle, chatWithArticle } from './services/gemini.js';
+import { searchNews } from './services/newsService.js';
 
 dotenv.config();
 
@@ -66,6 +66,20 @@ app.post('/api/analyze/text', async (req, res) => {
   try {
     const analysis = await analyzeArticle(text);
     res.json({ ...analysis, originalLength: text.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/chat', async (req, res) => {
+  const { articleText, question, history } = req.body;
+  if (!articleText || !question) {
+    return res.status(400).json({ error: 'Article text and question are required' });
+  }
+
+  try {
+    const answer = await chatWithArticle(articleText, question, history || []);
+    res.json({ answer });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

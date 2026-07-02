@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "check-api": "tsx src/check-api.ts",
     "build": "tsc",
     "test": "vitest run"
   },
